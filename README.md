@@ -214,12 +214,16 @@ The bot sends two types of notifications:
 ## 📊 How It Works
 
 1. **Monitoring Loop**: The bot checks all tracked players every 30 seconds (configurable)
-2. **BattleMetrics Integration**: Uses BattleMetrics API to fetch player sessions and server information
-3. **State Tracking**: Maintains player online/offline state to prevent notification spam
-4. **Dual Notifications**: 
+2. **Two-Step API Process**:
+   - **Step 1**: Uses private BattleMetrics API to resolve Steam ID to BattleMetrics player ID
+   - **Step 2**: Uses public BattleMetrics API to check current server status
+3. **Efficient Caching**: Caches BattleMetrics player IDs to avoid repeated Steam ID lookups
+4. **Online Detection**: Searches for `"online": true` in server meta data from included servers
+5. **State Tracking**: Maintains player online/offline state to prevent notification spam
+6. **Dual Notifications**: 
    - Sends notification when player comes online
    - Sends notification when player goes offline
-5. **Data Persistence**: Stores watchlist in `watchlist.json` file
+7. **Data Persistence**: Stores watchlist with cached BM IDs in `watchlist.json` file
 
 ## 🗂️ Data Structure
 
@@ -229,10 +233,17 @@ The bot maintains a watchlist with the following structure:
   "76561198123456789": {
     "added_by": "username",
     "notified": false,
-    "lastServer": "Server Name"
+    "lastServer": "Server Name",
+    "bmId": "1158355490"
   }
 }
 ```
+
+**Fields Explanation:**
+- `added_by`: Discord username who added the player
+- `notified`: Current notification state (true = online, false = offline)
+- `lastServer`: Name of the last server the player was seen on
+- `bmId`: Cached BattleMetrics player ID to avoid repeated API lookups
 
 ## 🚨 Troubleshooting
 
@@ -254,6 +265,11 @@ The bot maintains a watchlist with the following structure:
 - Verify the Steam ID is correct
 - Player might not exist in BattleMetrics database
 - Player might have never played on tracked servers
+
+#### "Found 0 servers in relationships"
+- This is normal behavior - the bot uses the `included` servers array for detection
+- Player's `relationships` object may be empty even when they're online
+- Bot automatically checks the `included` array for `"online": true` status
 
 ### Steam ID Format
 The bot requires **64-bit Steam IDs** (e.g., `76561198123456789`). You can convert other formats using:
@@ -289,9 +305,13 @@ You can customize the bot by modifying:
 ## 📈 Performance
 
 - **Memory Usage**: Lightweight, typically uses <50MB RAM
-- **API Calls**: ~2 API calls per tracked player per check cycle
+- **API Calls**: 
+  - ~1 private API call per new player (one-time Steam ID resolution)
+  - ~1 public API call per tracked player per check cycle
+  - Cached BM IDs reduce API usage significantly
 - **Scalability**: Can handle hundreds of tracked players efficiently
 - **Reliability**: Includes error handling and automatic retries
+- **Optimization**: BattleMetrics ID caching minimizes API rate limit issues
 
 ## 🔮 Future Features
 
