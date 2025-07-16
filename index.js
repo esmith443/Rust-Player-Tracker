@@ -124,6 +124,26 @@ const sendPlayerOfflineEmbed = async (steamId, lastServerName, playerName = null
     }
 };
 
+const sendServerChangeEmbed = async (steamId, fromServer, toServer, playerName = null) => {
+    const embed = new EmbedBuilder()
+        .setTitle('🔄 Player Changed Servers')
+        .setColor('#FFA500')
+        .addFields(
+            { name: 'Player', value: playerName || 'Unknown' },
+            { name: 'SteamID', value: `\`${steamId}\`` },
+            { name: 'From Server', value: fromServer || 'Unknown' },
+            { name: 'To Server', value: toServer || 'Unknown' },
+            { name: 'BattleMetrics', value: `https://www.battlemetrics.com/rcon/players?filter[search]=${steamId}` }
+        )
+        .setTimestamp();
+
+    try {
+        await axios.post(WEBHOOK_PLAYER_ALERT, { embeds: [embed] });
+    } catch (error) {
+        console.error('Failed to send server change alert webhook:', error);
+    }
+};
+
 const sendLogEmbed = async (action, user, steamId, addedBy = null, playerName = null) => {
     const isAdd = action === 'added';
     const fields = [
@@ -219,7 +239,8 @@ const checkPlayers = async () => {
             }
 
             const wasOnline = info.notified;
-            console.log(`🧠 ${steamId} — online: ${isOnline}, wasOnline: ${wasOnline}`);
+            const previousServer = info.lastServer;
+            console.log(`🧠 ${steamId} — online: ${isOnline}, wasOnline: ${wasOnline}, currentServer: ${activeServerName}, previousServer: ${previousServer}`);
 
             if (isOnline && !wasOnline) {
                 // Player came online
@@ -241,6 +262,15 @@ const checkPlayers = async () => {
                 });
                 await saveWatchlist();
                 console.log(`❌ ${playerName} (${steamId}) went offline from ${lastServerName}`);
+            } else if (isOnline && wasOnline && activeServerName !== previousServer && previousServer) {
+                // Player changed servers while online
+                await sendServerChangeEmbed(steamId, previousServer, activeServerName, playerName);
+                watchlist.set(steamId, { 
+                    ...info, 
+                    lastServer: activeServerName 
+                });
+                await saveWatchlist();
+                console.log(`🔄 ${playerName} (${steamId}) changed servers from ${previousServer} to ${activeServerName}`);
             }
         } catch (err) {
             console.error(`❌ Error checking ${steamId}:`, err.response?.data || err.message);
