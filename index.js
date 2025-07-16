@@ -61,11 +61,37 @@ const getServerName = async (serverId) => {
     }
 };
 
-const sendPlayerOnlineEmbed = async (steamId, serverName) => {
+const getPlayerName = async (steamId) => {
+    try {
+        // Check if we already have the name cached
+        const cachedInfo = watchlist.get(steamId);
+        if (cachedInfo?.playerName) {
+            return cachedInfo.playerName;
+        }
+        
+        // First resolve Steam ID to BM Player ID using private API
+        const searchRes = await bmAxios.get(`/players?filter[search]=${steamId}`);
+        const player = searchRes.data.data?.[0];
+        if (!player) return 'Unknown';
+        
+        const bmPlayerId = player.id;
+        
+        // Then get player name from public API
+        const publicRes = await axios.get(`https://api.battlemetrics.com/players/${bmPlayerId}`);
+        const publicPlayer = publicRes.data.data;
+        return publicPlayer.attributes?.name || 'Unknown';
+    } catch (error) {
+        console.error(`Error fetching player name for ${steamId}:`, error);
+        return 'Unknown';
+    }
+};
+
+const sendPlayerOnlineEmbed = async (steamId, serverName, playerName = null) => {
     const embed = new EmbedBuilder()
         .setTitle('🎮 Player Online')
         .setColor('#2E8B57')
         .addFields(
+            { name: 'Player', value: playerName || 'Unknown' },
             { name: 'SteamID', value: `\`${steamId}\`` },
             { name: 'Server', value: serverName },
             { name: 'BattleMetrics', value: `https://www.battlemetrics.com/rcon/players?filter[search]=${steamId}` }
@@ -79,11 +105,12 @@ const sendPlayerOnlineEmbed = async (steamId, serverName) => {
     }
 };
 
-const sendPlayerOfflineEmbed = async (steamId, lastServerName) => {
+const sendPlayerOfflineEmbed = async (steamId, lastServerName, playerName = null) => {
     const embed = new EmbedBuilder()
         .setTitle('🔴 Player Offline')
         .setColor('#DC143C')
         .addFields(
+            { name: 'Player', value: playerName || 'Unknown' },
             { name: 'SteamID', value: `\`${steamId}\`` },
             { name: 'Last Server', value: lastServerName || 'Unknown' },
             { name: 'BattleMetrics', value: `https://www.battlemetrics.com/rcon/players?filter[search]=${steamId}` }
@@ -97,9 +124,10 @@ const sendPlayerOfflineEmbed = async (steamId, lastServerName) => {
     }
 };
 
-const sendLogEmbed = async (action, user, steamId, addedBy = null) => {
+const sendLogEmbed = async (action, user, steamId, addedBy = null, playerName = null) => {
     const isAdd = action === 'added';
     const fields = [
+        { name: 'Player', value: playerName || 'Unknown' },
         { name: 'SteamID', value: `\`${steamId}\`` },
     ];
     if (isAdd) {
@@ -156,8 +184,20 @@ const checkPlayers = async () => {
             const publicRes = await axios.get(`https://api.battlemetrics.com/players/${bmPlayerId}?include=server`);
             const publicPlayer = publicRes.data.data;
             
+            // Get player name from cache or API response
+            let playerName = info.playerName;
+            if (!playerName) {
+                playerName = publicPlayer.attributes?.name || 'Unknown';
+                // Update watchlist with cached name
+                watchlist.set(steamId, { 
+                    ...info, 
+                    playerName: playerName 
+                });
+                await saveWatchlist();
+            }
+            
             // Debug logging
-            console.log(`🔍 Checking servers for ${steamId} (BM ID: ${bmPlayerId})`);
+            console.log(`🔍 Checking servers for ${steamId} (BM ID: ${bmPlayerId}, Name: ${playerName})`);
             const includedServers = publicRes.data.included || [];
             console.log(`📊 Found ${includedServers.length} servers in included data`);
             
@@ -183,24 +223,24 @@ const checkPlayers = async () => {
 
             if (isOnline && !wasOnline) {
                 // Player came online
-                await sendPlayerOnlineEmbed(steamId, activeServerName);
+                await sendPlayerOnlineEmbed(steamId, activeServerName, playerName);
                 watchlist.set(steamId, { 
                     ...info, 
                     notified: true, 
                     lastServer: activeServerName 
                 });
                 await saveWatchlist();
-                console.log(`✅ ${steamId} came online on ${activeServerName}`);
+                console.log(`✅ ${playerName} (${steamId}) came online on ${activeServerName}`);
             } else if (!isOnline && wasOnline) {
                 // Player went offline
                 const lastServerName = info.lastServer || 'Unknown';
-                await sendPlayerOfflineEmbed(steamId, lastServerName);
+                await sendPlayerOfflineEmbed(steamId, lastServerName, playerName);
                 watchlist.set(steamId, { 
                     ...info, 
                     notified: false 
                 });
                 await saveWatchlist();
-                console.log(`❌ ${steamId} went offline from ${lastServerName}`);
+                console.log(`❌ ${playerName} (${steamId}) went offline from ${lastServerName}`);
             }
         } catch (err) {
             console.error(`❌ Error checking ${steamId}:`, err.response?.data || err.message);
@@ -219,49 +259,87 @@ client.on('interactionCreate', async interaction => {
     const { commandName, options, user } = interaction;
     const steamId = options.getString('steam_id');
 
-    if (commandName === 'watch') {
-        if (watchlist.has(steamId)) {
-            await interaction.reply({ content: `⚠️ Already watching \`${steamId}\``, ephemeral: true });
-        } else {
-            watchlist.set(steamId, { 
-                added_by: user.username, 
-                notified: false, 
-                lastServer: null,
-                bmId: null // Will be resolved on first check
-            });
-            await saveWatchlist();
-            await interaction.reply({ content: `✅ Now watching \`${steamId}\`` });
-            await sendLogEmbed('added', user.username, steamId);
-        }
-    } else if (commandName === 'remove') {
-        if (watchlist.has(steamId)) {
-            const entry = watchlist.get(steamId);
-            const addedBy = entry.added_by || 'Unknown';
-            watchlist.delete(steamId);
-            await saveWatchlist();
-            await interaction.reply({ content: `✅ Removed \`${steamId}\`` });
-            await sendLogEmbed('removed', user.username, steamId, addedBy);
-        } else {
-            await interaction.reply({ content: `❌ SteamID \`${steamId}\` not found`, ephemeral: true });
-        }
-    } else if (commandName === 'list') {
-        if (watchlist.size === 0) {
-            return interaction.reply({ content: '📭 Watchlist is empty.', ephemeral: true });
-        }
-        const embed = new EmbedBuilder()
-            .setTitle('🔍 Current Watchlist')
-            .setColor('#3498db')
-            .setTimestamp();
-        let desc = '';
-        for (const [steamId, info] of watchlist.entries()) {
-            desc += `• \`${steamId}\` — added by **${info.added_by || 'Unknown'}**\n`;
-        }
-        embed.setDescription(desc);
-        await interaction.reply({ embeds: [embed], ephemeral: true });
-    } else if (commandName === 'status') {
-        try {
+    try {
+        if (commandName === 'watch') {
+            if (watchlist.has(steamId)) {
+                await interaction.reply({ content: `⚠️ Already watching \`${steamId}\``, flags: 64 });
+            } else {
+                // Defer reply IMMEDIATELY before any other operations
+                await interaction.deferReply();
+                
+                // Add to watchlist immediately with unknown name
+                watchlist.set(steamId, { 
+                    added_by: user.username, 
+                    notified: false, 
+                    lastServer: null,
+                    bmId: null, // Will be resolved on first check
+                    playerName: null // Will be resolved on first check
+                });
+                await saveWatchlist();
+                await interaction.editReply({ content: `✅ Now watching \`${steamId}\`` });
+                
+                // Get player name asynchronously for log embed (non-blocking)
+                getPlayerName(steamId).then(playerName => {
+                    // Update the watchlist with the name
+                    const currentInfo = watchlist.get(steamId);
+                    if (currentInfo) {
+                        watchlist.set(steamId, { ...currentInfo, playerName });
+                        saveWatchlist();
+                    }
+                    // Send log embed with name
+                    sendLogEmbed('added', user.username, steamId, null, playerName);
+                }).catch(error => {
+                    console.error('Error fetching player name:', error);
+                    // Send log embed without name
+                    sendLogEmbed('added', user.username, steamId, null, 'Unknown');
+                });
+            }
+        } else if (commandName === 'remove') {
+            if (watchlist.has(steamId)) {
+                // Defer reply immediately to avoid timeout
+                await interaction.deferReply();
+                
+                const entry = watchlist.get(steamId);
+                const addedBy = entry.added_by || 'Unknown';
+                const cachedPlayerName = entry.playerName;
+                
+                watchlist.delete(steamId);
+                await saveWatchlist();
+                await interaction.editReply({ content: `✅ Removed \`${steamId}\`` });
+                
+                // Send log embed with cached name or fetch it
+                if (cachedPlayerName) {
+                    await sendLogEmbed('removed', user.username, steamId, addedBy, cachedPlayerName);
+                } else {
+                    // Fetch name asynchronously for log embed (non-blocking)
+                    getPlayerName(steamId).then(playerName => {
+                        sendLogEmbed('removed', user.username, steamId, addedBy, playerName);
+                    }).catch(error => {
+                        console.error('Error fetching player name for removal:', error);
+                        sendLogEmbed('removed', user.username, steamId, addedBy, 'Unknown');
+                    });
+                }
+            } else {
+                await interaction.reply({ content: `❌ SteamID \`${steamId}\` not found`, flags: 64 });
+            }
+        } else if (commandName === 'list') {
+            if (watchlist.size === 0) {
+                return interaction.reply({ content: '📭 Watchlist is empty.', flags: 64 });
+            }
+            const embed = new EmbedBuilder()
+                .setTitle('🔍 Current Watchlist')
+                .setColor('#3498db')
+                .setTimestamp();
+            let desc = '';
+            for (const [steamId, info] of watchlist.entries()) {
+                const playerName = info.playerName || 'Unknown';
+                desc += `• **${playerName}** (\`${steamId}\`) — added by **${info.added_by || 'Unknown'}**\n`;
+            }
+            embed.setDescription(desc);
+            await interaction.reply({ embeds: [embed], flags: 64 });
+        } else if (commandName === 'status') {
             const { data: { data: [player] = [] } } = await bmAxios.get(`/players?filter[search]=${steamId}`);
-            if (!player) return interaction.reply({ content: `❌ Player not found.`, ephemeral: true });
+            if (!player) return interaction.reply({ content: `❌ Player not found.`, flags: 64 });
             const isOnline = Boolean(player.attributes?.online);
             let serverName = 'N/A';
 
@@ -274,10 +352,13 @@ client.on('interactionCreate', async interaction => {
                 }
             }
 
+            const playerName = player.attributes?.name || 'Unknown';
+            
             const embed = new EmbedBuilder()
                 .setTitle('🔍 Player Status')
                 .setColor(isOnline ? '#00cc66' : '#cc0000')
                 .addFields(
+                    { name: 'Player', value: playerName, inline: true },
                     { name: 'SteamID', value: `\`${steamId}\``, inline: true },
                     { name: 'Online?', value: isOnline ? '✅ Yes' : '❌ No', inline: true },
                     { name: 'Server', value: serverName, inline: true },
@@ -285,18 +366,13 @@ client.on('interactionCreate', async interaction => {
                 )
                 .setTimestamp();
             return interaction.reply({ embeds: [embed] });
-        } catch (err) {
-            console.error('❌ /status error:', err.response?.data || err.message);
-            return interaction.reply({ content: '❌ Error checking status.', ephemeral: true });
-        }
-    } else if (commandName === 'force_check') {
-        if (watchlist.size === 0) {
-            return interaction.reply({ content: '📭 Watchlist is empty. Add some players first!', ephemeral: true });
-        }
+        } else if (commandName === 'force_check') {
+            if (watchlist.size === 0) {
+                return interaction.reply({ content: '📭 Watchlist is empty. Add some players first!', flags: 64 });
+            }
 
-        await interaction.deferReply({ ephemeral: true });
-
-        try {
+            await interaction.deferReply({ flags: 64 }); // 64 = EPHEMERAL flag
+            
             console.log('🔁 Force check triggered by user:', user.username);
             
             // Run the check function
@@ -313,10 +389,17 @@ client.on('interactionCreate', async interaction => {
                 .setTimestamp();
 
             await interaction.editReply({ embeds: [embed] });
-            
-        } catch (error) {
-            console.error('❌ Force check error:', error);
-            await interaction.editReply({ content: '❌ Error running force check. Check console for details.' });
+        }
+    } catch (error) {
+        console.error('❌ Interaction error:', error);
+        try {
+            if (!interaction.replied && !interaction.deferred) {
+                await interaction.reply({ content: '❌ An error occurred while processing your command.', flags: 64 });
+            } else if (interaction.deferred && !interaction.replied) {
+                await interaction.editReply({ content: '❌ An error occurred while processing your command.' });
+            }
+        } catch (replyError) {
+            console.error('❌ Failed to send error response:', replyError.message);
         }
     }
 });
