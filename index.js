@@ -368,21 +368,31 @@ client.on('interactionCreate', async interaction => {
             embed.setDescription(desc);
             await interaction.reply({ embeds: [embed], flags: 64 });
         } else if (commandName === 'status') {
+            // Use same detection method as monitoring system
             const { data: { data: [player] = [] } } = await bmAxios.get(`/players?filter[search]=${steamId}`);
             if (!player) return interaction.reply({ content: `❌ Player not found.`, flags: 64 });
-            const isOnline = Boolean(player.attributes?.online);
+            
+            const bmPlayerId = player.id;
+            
+            // Use public API to check current server status (same as monitoring)
+            const publicRes = await axios.get(`https://api.battlemetrics.com/players/${bmPlayerId}?include=server`);
+            const publicPlayer = publicRes.data.data;
+            
+            // Get player name from public API response
+            const playerName = publicPlayer.attributes?.name || 'Unknown';
+            
+            // Check if player is online by looking for "online": true in included server meta
+            let isOnline = false;
             let serverName = 'N/A';
-
-            if (isOnline) {
-                const { data: { data: sessions = [] } } = await bmAxios.get(`/sessions?filter[players]=${player.id}&include=server`);
-                const active = sessions.find(s => s.attributes?.endsAt === null);
-                if (active) {
-                    const serverId = active.relationships?.server?.data?.id;
-                    serverName = serverId ? await getServerName(serverId) : 'Unknown';
+            
+            const includedServers = publicRes.data.included || [];
+            for (const server of includedServers) {
+                if (server.type === 'server' && server.meta?.online === true) {
+                    isOnline = true;
+                    serverName = server.attributes?.name || 'Unknown';
+                    break;
                 }
             }
-
-            const playerName = player.attributes?.name || 'Unknown';
             
             const embed = new EmbedBuilder()
                 .setTitle('🔍 Player Status')
